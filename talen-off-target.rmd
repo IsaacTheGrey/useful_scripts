@@ -1,0 +1,160 @@
+---
+title: "TALEN off-target quantification"
+output: html_notebook
+---
+
+```{r}
+library(Biostrings)
+library(GenomicRanges)
+library(rtracklayer)
+library(ggplot2)
+library(dplyr)
+
+setwd("C:/Users/federico97/Desktop/revisions_Nadja/TALEN_off-target")
+
+# Define Input Files
+genome_file <- "genome.fold.FINAL.fasta.noDuplicates_noMito.fasta/genome.fold.FINAL.fasta.noDuplicates_noMito.fasta"
+gtf_file <- ""    # If present, otherwise leave an empty string 
+
+# Load genome sequence
+genome <- readDNAStringSet(genome_file, format = "fasta")
+names(genome) <- sub(" .*", "", names(genome))  # Clean sequence names
+genome
+```
+
+```{r}
+# Define TALEN sequences (Put both sequences as 5'-> 3')
+talen_left <- "CATGACATAACTGAGAGTTATC"  
+talen_right <- "GTGGTTAACTGAGAGTTATC"  
+max_mismatch <- 1
+
+# the downstream TALEN needs to be reverse complemented in order to be identified by vmatchPattern (it's a way to look for it on the - strand)
+talen_right_rc <- as.character(reverseComplement(DNAString(talen_right)))
+
+# Find matching sites in the genome
+left_hits <- vmatchPattern(talen_left, genome, max.mismatch = max_mismatch)
+right_hits <- vmatchPattern(talen_right_rc, genome, max.mismatch = max_mismatch)
+
+# to check how many hits per scaffold
+print(elementNROWS(left_hits))
+print(elementNROWS(right_hits))
+```
+
+
+
+```{r}
+left_start <- as.numeric(unlist(start(left_hits)))
+left_end <- as.numeric(unlist(end(left_hits)))
+right_start <- as.numeric(unlist(start(right_hits)))
+right_end <- as.numeric(unlist(end(right_hits)))
+
+left_seqnames <- rep(names(genome), elementNROWS(left_hits))
+right_seqnames <- rep(names(genome), elementNROWS(right_hits))
+
+# Convert to GRanges for further processing
+left_gr <- GRanges(seqnames = left_seqnames, ranges = IRanges(start = left_start, end = left_end), strand = "+")
+right_gr <- GRanges(seqnames = right_seqnames, ranges = IRanges(start = right_start, end = right_end), strand = "-")
+
+# Get sequence lengths from genome (named vector)
+seq_lengths <- setNames(width(genome), names(genome))
+
+# Subset the sequence lengths to match scaffolds in left_gr/right_gr
+seqlengths(left_gr) <- seq_lengths[names(seqlengths(left_gr))]
+seqlengths(right_gr) <- seq_lengths[names(seqlengths(right_gr))]
+
+# Define TALEN spacer length range (adjust for your design)
+spacer_min <- 5 # at the moment this is not in use
+spacer_max <- 3000
+
+# Find TALEN pairs 
+find_potential_targets <- function(left_sites, right_sites, min, max) {
+    potential_pairs <- IRanges::findOverlaps(left_sites, right_sites, maxgap = max, minoverlap = 0, type = "any", ignore.strand=T)
+    left_hits_matched <- left_sites[queryHits(potential_pairs)]
+    right_hits_matched <- right_sites[subjectHits(potential_pairs)]
+    
+
+    # Ensure left is always upstream of right (to avoid false positives)
+    valid_pairs <- start(right_hits_matched) > start(left_hits_matched)
+
+    # Filter out invalid pairs
+    left_hits_matched <- left_hits_matched[valid_pairs]
+    right_hits_matched <- right_hits_matched[valid_pairs]
+    
+    
+    return(data.frame(
+        Chromosome = seqnames(left_hits_matched),
+        Left_Start = start(left_hits_matched),
+        Left_End = end(left_hits_matched),
+        Right_Start = start(right_hits_matched),
+        Right_End = end(right_hits_matched),
+        Spacer = start(right_hits_matched) - end(left_hits_matched) - 1
+    ))
+}
+
+# Get final matched TALEN target sites
+talen_targets <- find_potential_targets(left_gr, right_gr, spacer_min, spacer_max)
+
+talen_targets <- talen_targets[talen_targets$Spacer > 0, ]
+
+
+# Load genome annotation (if available) to check for gene context
+if (file.exists(gtf_file)) {
+    gtf <- import(gtf_file)
+    gene_regions <- gtf[gtf$type == "gene"]
+    
+    # Find if any TALEN sites overlap with genes
+    target_gr <- GRanges(seqnames = talen_targets$Chromosome, ranges = IRanges(talen_targets$Left_Start, talen_targets$Right_End))
+    overlaps <- findOverlaps(target_gr, gene_regions)
+    
+    # Annotate targets with gene names if available
+    if (length(overlaps) > 0) {
+        talen_targets$Gene <- as.character(gene_regions$gene_id[subjectHits(overlaps)])
+    } else {
+        talen_targets$Gene <- NA
+    }
+}
+
+# Save results to a CSV file
+write.csv(talen_targets, "talen_off_targets.csv", row.names = FALSE)
+
+# Display output
+print(talen_targets)
+
+```
+Visualization
+```{r}
+hist(talen_targets$Spacer, main="TALEN Off-Target Spacer Length Distribution", xlab="Spacer Length (bp)", col="blue", breaks=10)
+```
+
+
+```{r}
+ggplot(talen_targets, aes(x = as.numeric(factor(Chromosome)), y = (Left_Start + Right_End) / 2)) +
+    geom_point(aes(color = Chromosome), size = 2, alpha = 0.7) +
+    scale_x_continuous(breaks = 1:length(unique(talen_targets$Chromosome)), labels = unique(talen_targets$Chromosome)) +
+    labs(title = "Genome-Wide TALEN Off-Target Distribution", x = "Chromosome", y = "Genomic Position (bp)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r}
+library(ggridges)
+ggplot(talen_targets, aes(y = factor(Chromosome), x = (Left_Start + Right_End) / 2)) +
+    geom_density_ridges(aes(fill = Chromosome), alpha = 0.7) +
+    labs(title = "TALEN Off-Target Density Across Chromosomes", x = "Genomic Position (bp)", y = "Chromosome") +
+    theme_minimal()
+
+```
+```{r}
+library(ggplot2)
+library(viridis)
+
+ggplot(talen_targets, aes(x = as.numeric(factor(Chromosome)), y = (Left_Start + Right_End) / 2)) +
+    stat_bin2d(bins = c(24, 100), aes(fill = after_stat(count))) +
+    scale_fill_viridis(option = "plasma", direction = -1) +
+    scale_x_continuous(breaks = 1:length(unique(talen_targets$Chromosome)), labels = unique(talen_targets$Chromosome)) +
+    labs(title = "TALEN Off-Target Density Heatmap", x = "Chromosome", y = "Genomic Position (bp)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+

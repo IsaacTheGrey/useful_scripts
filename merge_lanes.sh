@@ -13,15 +13,15 @@ if (( ${#lanes[@]} == 0 )); then
 fi
 
 # 2) discover unique sample names by stripping the suffix from forward reads
+#    Search recursively within each lane folder for *_R1.trimmed.paired.fastq.gz
 mapfile -t samples < <(
-  find "${lanes[@]}" -maxdepth 1 -type f -name "*_forward_paired.fastq.gz" \
-    -printf "%f\n" \
-  | sed 's/_forward_paired\.fastq\.gz$//' \
+  find "${lanes[@]}" -type f -name "*_R1.trimmed.paired.fastq.gz" -printf "%f\n" \
+  | sed 's/_R1\.trimmed\.paired\.fastq\.gz$//' \
   | sort -u
 )
 
 if (( ${#samples[@]} == 0 )); then
-  echo "ERROR: no '*_forward_paired.fastq.gz' files found in ${lanes[*]}." >&2
+  echo "ERROR: no '*_R1.trimmed.paired.fastq.gz' files found under: ${lanes[*]}." >&2
   exit 1
 fi
 
@@ -29,20 +29,24 @@ fi
 for sample in "${samples[@]}"; do
   echo "► Merging sample: $sample"
 
-  # gather per-lane inputs
-  fwd=()
-  rev=()
-  for d in "${lanes[@]}"; do
-    fp="$d/${sample}_forward_paired.fastq.gz"
-    rp="$d/${sample}_reverse_paired.fastq.gz"
-
-    [[ -f $fp ]] && fwd+=( "$fp" )
-    [[ -f $rp ]] && rev+=( "$rp" )
-  done
+  # gather per-lane inputs (recursively in subfolders)
+  mapfile -t fwd < <(
+    find "${lanes[@]}" -type f -name "${sample}_R1.trimmed.paired.fastq.gz" \
+    | sort
+  )
+  mapfile -t rev < <(
+    find "${lanes[@]}" -type f -name "${sample}_R2.trimmed.paired.fastq.gz" \
+    | sort
+  )
 
   if (( ${#fwd[@]} == 0 )); then
     echo "  ⚠️  No forward reads found for $sample, skipping." >&2
     continue
+  fi
+
+  # (optional) sanity warning if counts differ
+  if (( ${#rev[@]} > 0 )) && (( ${#rev[@]} != ${#fwd[@]} )); then
+    echo "  ⚠️  Forward/Reverse file count mismatch for $sample (${#fwd[@]} R1 vs ${#rev[@]} R2)." >&2
   fi
 
   # merge forward reads
